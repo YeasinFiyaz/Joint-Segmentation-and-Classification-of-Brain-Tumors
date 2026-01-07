@@ -90,7 +90,7 @@ Overlay visualization
 
 Predicted tumor class with confidence
 
-##Results Summary
+# Results Summary
 
 Attention U-Net showed better segmentation performance than standard U-Net
 
@@ -107,4 +107,4 @@ Joint learning enabled efficient feature sharing between tasks
 - Matplotlib
 - Google Colab
 
-#This project is intended for academic and educational purposes.
+# This project is intended for academic and educational purposes.
