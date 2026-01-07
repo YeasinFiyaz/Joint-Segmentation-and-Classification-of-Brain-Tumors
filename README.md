@@ -14,53 +14,53 @@ This project implements a deep learning–based system for brain tumor segmentat
 
 
 **Tasks:**
--Segmentation (MRI image + tumor mask)
--Classification (tumor type)
+- Segmentation (MRI image + tumor mask)
+- Classification (tumor type)
 
 **Tumor classes:**
 
--Glioma
--Meningioma
--Pituitary tumor
--No tumor
+- Glioma
+- Meningioma
+- Pituitary tumor
+- No tumor
 
-⚙️ **Preprocessing Pipeline**
+**Preprocessing Pipeline**
 
 A common preprocessing pipeline was applied to all images:
--Resize images and masks to 256 × 256
--Normalize pixel values to [0, 1]
--Convert masks to binary format
--Apply data augmentation (random horizontal and vertical flips) during training
+- Resize images and masks to 256 × 256
+- Normalize pixel values to [0, 1]
+- Convert masks to binary format
+- Apply data augmentation (random horizontal and vertical flips) during training
 
 **Model Architectures**
 🔹 U-Net with Classifier Head
-***Encoder–decoder architecture for segmentation***
-***Skip connections to preserve spatial details***
-***MLP classifier head attached to the encoder bottleneck for tumor classification***
+- ***Encoder–decoder architecture for segmentation***
+- ***Skip connections to preserve spatial details***
+- ***MLP classifier head attached to the encoder bottleneck for tumor classification***
 
 🔹 Attention U-Net with Classifier Head
-***Extends U-Net by adding attention gates in skip connections***
-***Focuses on tumor-relevant regions and suppresses background noise***
-***Improves segmentation accuracy for small tumor regions***
+- ***Extends U-Net by adding attention gates in skip connections***
+- ***Focuses on tumor-relevant regions and suppresses background noise***
+- ***Improves segmentation accuracy for small tumor regions***
 
 **Tasks Performed**
--Segmentation
--Binary tumor vs background segmentation
+- Segmentation
+- Binary tumor vs background segmentation
 
 **Metrics used:**
 
--Mean Intersection over Union (mIoU)
--Dice coefficient
--Pixel accuracy
--Classification
--Image-level tumor type prediction
+- Mean Intersection over Union (mIoU)
+- Dice coefficient
+- Pixel accuracy
+- Classification
+- Image-level tumor type prediction
 
 **Metrics used:**
 
--Accuracy
--Precision
--Recall
--F1-score
+- Accuracy
+- Precision
+- Recall
+- F1-score
 
 **Training Strategy**
 
@@ -100,16 +100,11 @@ Joint learning enabled efficient feature sharing between tasks
 
 **Tools & Technologies**
 
-Python
+- Python
+- PyTorch
+- OpenCV
+- NumPy
+- Matplotlib
+- Google Colab
 
-PyTorch
-
-OpenCV
-
-NumPy
-
-Matplotlib
-
-Google Colab
-
-This project is intended for academic and educational purposes.
+#This project is intended for academic and educational purposes.
