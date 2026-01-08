@@ -78,3 +78,22 @@ if isinstance(mj, dict):
 elif isinstance(mj, list):
     print("JSON list length:", len(mj))
     print("First item keys:", list(mj[0].keys())[:20])
+# @title
+import os, glob
+
+IMG_EXTS = (".png",".jpg",".jpeg",".bmp",".tif",".tiff")
+
+def collect_images(path):
+    files=[]
+    for ext in IMG_EXTS:
+        files += glob.glob(os.path.join(path, f"**/*{ext}"), recursive=True)
+    return sorted(files)
+
+SEG_ROOT = os.path.join(ROOT, "segmentation_task")
+CLS_ROOT = os.path.join(ROOT, "classification_task")
+
+print("SEG_ROOT exists:", os.path.exists(SEG_ROOT), SEG_ROOT)
+print("CLS_ROOT exists:", os.path.exists(CLS_ROOT), CLS_ROOT)
+
+print("Seg images found:", len(collect_images(SEG_ROOT)))
+print("Cls images found:", len(collect_images(CLS_ROOT)))
