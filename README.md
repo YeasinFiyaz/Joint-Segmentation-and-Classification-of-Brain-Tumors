@@ -74,7 +74,7 @@ Optimizer: Adam
 
 Learning rate: 1e-3
 
-Epochs: 10–30 (configurable)
+Epochs: 100
 
 ##Visualization & Demo
 
