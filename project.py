@@ -97,3 +97,62 @@ print("CLS_ROOT exists:", os.path.exists(CLS_ROOT), CLS_ROOT)
 
 print("Seg images found:", len(collect_images(SEG_ROOT)))
 print("Cls images found:", len(collect_images(CLS_ROOT)))
+# @title
+import re
+
+def stem(p):
+    b = os.path.basename(p)
+    return os.path.splitext(b)[0]
+
+def count_imgs(p):
+    return sum(len(glob.glob(os.path.join(p, f"**/*{ext}"), recursive=True)) for ext in IMG_EXTS)
+
+# find candidate dirs inside segmentation_task
+dirs=[]
+for p, d, f in os.walk(SEG_ROOT):
+    c = count_imgs(p)
+    if c >= 10:
+        dirs.append((p,c))
+dirs = sorted(dirs, key=lambda x: x[1], reverse=True)
+
+mask_like = [(p,c) for p,c in dirs if any(k in p.lower() for k in ["mask","gt","label","seg"])]
+img_like  = [(p,c) for p,c in dirs if any(k in p.lower() for k in ["image","img","scan","data"])]
+
+print("Top image-like dirs:")
+for p,c in img_like[:5]:
+    print(c, ":", p)
+
+print("\nTop mask-like dirs:")
+for p,c in mask_like[:5]:
+    print(c, ":", p)
+
+SEG_IMG_DIR  = img_like[0][0] if len(img_like)>0 else SEG_ROOT
+SEG_MASK_DIR = mask_like[0][0] if len(mask_like)>0 else SEG_ROOT
+
+print("\nChosen SEG_IMG_DIR :", SEG_IMG_DIR)
+print("Chosen SEG_MASK_DIR:", SEG_MASK_DIR)
+
+img_files  = collect_images(SEG_IMG_DIR)
+mask_files = collect_images(SEG_MASK_DIR)
+
+mask_map = {stem(m): m for m in mask_files}
+
+pairs=[]
+missing=0
+for im in img_files:
+    s = stem(im)
+    if s in mask_map:
+        pairs.append((im, mask_map[s]))
+    else:
+        s2 = re.sub(r'(_mask|_seg|_label|_gt)$', '', s, flags=re.IGNORECASE)
+        if s2 in mask_map:
+            pairs.append((im, mask_map[s2]))
+        else:
+            missing += 1
+
+print("\nTotal images:", len(img_files))
+print("Total masks :", len(mask_files))
+print("Matched pairs:", len(pairs))
+print("Missing matches:", missing)
+
+print("\nSample pair:", pairs[0] if len(pairs)>0 else None)
