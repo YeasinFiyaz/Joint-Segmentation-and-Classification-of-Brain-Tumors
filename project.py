@@ -303,3 +303,73 @@ for im, mk in pairs:
 
 print("Joint samples:", len(joint_samples))
 print("Fallback labels used (from filename):", fallback_used)
+
+IMG_SIZE = 256 #preprocessing    
+
+def read_image_gray(path):
+    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        raise ValueError("Could not read image: " + path)
+    return img
+
+def read_mask_binary(path):
+    m = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if m is None:
+        raise ValueError("Could not read mask: " + path)
+    m = (m > 127).astype(np.uint8)
+    return m
+
+def preprocess_img(img, size=IMG_SIZE):  #common preprocessing image pipeline
+    img = cv2.resize(img, (size,size), interpolation=cv2.INTER_AREA)
+    img = img.astype(np.float32)/255.0
+    return img
+
+def preprocess_mask(mask, size=IMG_SIZE):  #common preprocessing mask pipeline
+    mask = cv2.resize(mask, (size,size), interpolation=cv2.INTER_NEAREST)
+    mask = (mask>0).astype(np.float32)
+    return mask
+
+class SegClsDataset(Dataset):
+    def __init__(self, samples, augment=False):
+        self.samples=samples
+        self.augment=augment
+
+    def __len__(self): return len(self.samples)
+
+    def __getitem__(self, idx):
+        im_path, mk_path, label = self.samples[idx]
+        img = preprocess_img(read_image_gray(im_path))
+        mk  = preprocess_mask(read_mask_binary(mk_path))
+
+        if self.augment:   #Data Augmentation for best output ensurity
+            if random.random() < 0.5:
+                img = np.fliplr(img).copy(); mk = np.fliplr(mk).copy()
+            if random.random() < 0.5:
+                img = np.flipud(img).copy(); mk = np.flipud(mk).copy()
+
+        img_t = torch.from_numpy(img).unsqueeze(0)   # (1,H,W)
+        mk_t  = torch.from_numpy(mk).unsqueeze(0)    # (1,H,W)
+        y_t   = torch.tensor(label, dtype=torch.long)
+        return img_t, mk_t, y_t, im_path, mk_path
+
+def split_samples(samples, val_ratio=0.2):
+    idx = np.arange(len(samples))
+    np.random.shuffle(idx)
+    v = int(len(samples)*val_ratio)
+    val_idx = idx[:v]
+    tr_idx  = idx[v:]
+    tr = [samples[i] for i in tr_idx]
+    va = [samples[i] for i in val_idx]
+    return tr, va
+
+train_samples, val_samples = split_samples(joint_samples, 0.2)
+
+train_ds = SegClsDataset(train_samples, augment=True)
+val_ds   = SegClsDataset(val_samples, augment=False)
+
+BATCH=8
+train_loader = DataLoader(train_ds, batch_size=BATCH, shuffle=True, num_workers=2, pin_memory=True)
+val_loader   = DataLoader(val_ds, batch_size=BATCH, shuffle=False, num_workers=2, pin_memory=True)
+
+NUM_CLASSES = len(class_dirs) if len(class_dirs)>0 else 4
+print("Train:", len(train_ds), "Val:", len(val_ds), "NUM_CLASSES:", NUM_CLASSES)
