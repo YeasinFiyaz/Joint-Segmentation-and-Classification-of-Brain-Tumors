@@ -688,5 +688,107 @@ print("Att best val Acc:", max(hist_att["val_acc"]))
 show_random_result(att_unet, val_ds)
 show_random_result(att_unet, val_ds)
 
+#result summary
+
 for _ in range(10):
     show_random_result(att_unet, val_ds)
+def segmentation_metrics(pred01, gt01, eps=1e-6):
+    # pred01, gt01: numpy arrays {0,1} shape (H,W)
+    inter = (pred01 & gt01).sum()
+    union = (pred01 | gt01).sum()
+
+    iou  = (inter + eps) / (union + eps)
+    dice = (2*inter + eps) / (pred01.sum() + gt01.sum() + eps)
+    pix_acc = (pred01 == gt01).mean()
+
+    return iou, dice, pix_acc
+@torch.no_grad()
+def evaluate_split(model, loader, device):
+    model.eval()
+
+    seg_iou_list, seg_dice_list, seg_pix_list = [], [], []
+    y_true, y_pred = [], []
+
+    for batch in loader:
+        # Support both (img,mask,label) and (img,mask,label,im_path,mask_path)
+        if len(batch) >= 3:
+            imgs, masks, labels = batch[0], batch[1], batch[2]
+        else:
+            raise ValueError("Loader batch does not contain (img, mask, label).")
+
+        imgs = imgs.to(device)
+        masks = masks.to(device)
+        labels = labels.to(device)
+
+        seg_logits, cls_logits = model(imgs)
+
+        # segmentation predictions
+        seg_probs = torch.sigmoid(seg_logits).cpu().numpy()  # (B,1,H,W)
+        gt_masks  = masks.cpu().numpy()                      # (B,1,H,W)
+
+        for p, g in zip(seg_probs, gt_masks):
+            pred01 = (p[0] > 0.5).astype(np.uint8)
+            gt01   = (g[0] > 0.5).astype(np.uint8)
+            iou, dice, pix = segmentation_metrics(pred01, gt01)
+            seg_iou_list.append(iou)
+            seg_dice_list.append(dice)
+            seg_pix_list.append(pix)
+
+        # classification predictions
+        pred_cls = cls_logits.argmax(dim=1).cpu().numpy()
+        y_pred.extend(pred_cls.tolist())
+        y_true.extend(labels.cpu().numpy().tolist())
+
+    # classification summary
+    acc  = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, average="macro", zero_division=0)
+    rec  = recall_score(y_true, y_pred, average="macro", zero_division=0)
+    f1   = f1_score(y_true, y_pred, average="macro", zero_division=0)
+
+    results = {
+        "mIoU": float(np.mean(seg_iou_list)),
+        "Dice": float(np.mean(seg_dice_list)),
+        "PixelAcc": float(np.mean(seg_pix_list)),
+        "Accuracy": float(acc),
+        "Precision": float(prec),
+        "Recall": float(rec),
+        "F1": float(f1),
+        "N_samples": int(len(y_true))
+    }
+    return results
+def make_results_summary(model, train_loader, val_loader, test_loader=None, device=None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    rows = []
+
+    # Train
+    tr = evaluate_split(model, train_loader, device)
+    tr["Split"] = "Train"
+    rows.append(tr)
+
+    # Val
+    va = evaluate_split(model, val_loader, device)
+    va["Split"] = "Validation"
+    rows.append(va)
+
+    # Test (optional)
+    if test_loader is not None:
+        te = evaluate_split(model, test_loader, device)
+        te["Split"] = "Test"
+        rows.append(te)
+    else:
+        print("test_loader not found. Train/Validation summary created.")
+
+    df = pd.DataFrame(rows)[["Split","N_samples","mIoU","Dice","PixelAcc","Accuracy","Precision","Recall","F1"]]
+
+    # make it pretty
+    for c in ["mIoU","Dice","PixelAcc","Accuracy","Precision","Recall","F1"]:
+        df[c] = df[c].map(lambda x: f"{x:.4f}")
+
+    return df
+summary_df = make_results_summary(att_unet, train_loader, val_loader, test_loader=None, device=DEVICE)
+summary_df
+
+
+print(summary_df.to_string(index=False))
