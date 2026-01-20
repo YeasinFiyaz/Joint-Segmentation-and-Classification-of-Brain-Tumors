@@ -373,3 +373,320 @@ val_loader   = DataLoader(val_ds, batch_size=BATCH, shuffle=False, num_workers=2
 
 NUM_CLASSES = len(class_dirs) if len(class_dirs)>0 else 4
 print("Train:", len(train_ds), "Val:", len(val_ds), "NUM_CLASSES:", NUM_CLASSES)
+def iou_score_from_logits(logits, targets, thresh=0.5, eps=1e-6):
+    probs = torch.sigmoid(logits)
+    preds = (probs > thresh).float()
+    targets = (targets > 0.5).float()
+    inter = (preds*targets).sum(dim=(1,2,3))
+    union = (preds + targets - preds*targets).sum(dim=(1,2,3))
+    return ((inter+eps)/(union+eps)).mean().item()
+
+def cls_accuracy(logits, labels):
+    pred = logits.argmax(dim=1)
+    return (pred == labels).float().mean().item()
+
+def overlay_mask(img_gray, mask01, alpha=0.4):
+    img_rgb = np.stack([img_gray, img_gray, img_gray], axis=-1).astype(np.float32)
+    color = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+    idx = mask01 > 0.5
+    img_rgb[idx] = (1-alpha)*img_rgb[idx] + alpha*color
+    return img_rgb
+
+def show_result_grid(original, gt_mask, pred_mask, processed=None, cls_acc=None, iou=None):
+    fig, axs = plt.subplots(2, 3, figsize=(12, 7))
+    title = "classification accuracy - "
+    title += f"{cls_acc:.3f} " if cls_acc is not None else "- "
+    title += "   IoU - "
+    title += f"{iou:.3f}" if iou is not None else "-"
+    fig.suptitle(title)
+
+    axs[0,0].imshow(original, cmap="gray"); axs[0,0].set_title("Original image"); axs[0,0].axis("off")
+    axs[0,1].imshow(gt_mask, cmap="gray"); axs[0,1].set_title("Original mask"); axs[0,1].axis("off")
+    axs[0,2].imshow(overlay_mask(original, gt_mask)); axs[0,2].set_title("Original image with mask overlay"); axs[0,2].axis("off")
+
+    if processed is None:
+        processed = original
+    axs[1,0].imshow(processed, cmap="gray")
+    axs[1,0].set_title("Processed image (if applicable else just show original image)")
+    axs[1,0].axis("off")
+
+    axs[1,1].imshow(pred_mask, cmap="gray"); axs[1,1].set_title("Predicted mask"); axs[1,1].axis("off")
+    axs[1,2].imshow(overlay_mask(original, pred_mask)); axs[1,2].set_title("Original image with predicted mask overlay"); axs[1,2].axis("off")
+
+    plt.tight_layout()
+    plt.show()
+class DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+    def forward(self,x): return self.net(x)
+
+class Down(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.net = nn.Sequential(nn.MaxPool2d(2), DoubleConv(in_ch, out_ch))
+    def forward(self,x): return self.net(x)
+
+class Up(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_ch, in_ch//2, 2, 2)
+        self.conv = DoubleConv(in_ch, out_ch)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        diffY = x2.size(2) - x1.size(2)
+        diffX = x2.size(3) - x1.size(3)
+        x1 = F.pad(x1, [diffX//2, diffX-diffX//2, diffY//2, diffY-diffY//2])
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class UNetWithClassifier(nn.Module):
+    def __init__(self, in_ch=1, num_classes=4, base=32):
+        super().__init__()
+        self.inc = DoubleConv(in_ch, base) #Downsampling
+        self.down1 = Down(base, base*2)
+        self.down2 = Down(base*2, base*4)
+        self.down3 = Down(base*4, base*8)
+        self.down4 = Down(base*8, base*16)
+
+        self.up1 = Up(base*16, base*8)
+        self.up2 = Up(base*8,  base*4)
+        self.up3 = Up(base*4,  base*2)
+        self.up4 = Up(base*2,  base)
+        self.outc = nn.Conv2d(base, 1, 1)
+
+        # classifier head from bottleneck (encoder output)  #custom 'MLP classifier head' (Random classifier as asked in the project guideline)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.cls_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(base*16, base*8),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(base*8, num_classes)
+        )
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        xb = self.down4(x4)
+
+        cls_logits = self.cls_head(self.gap(xb))
+
+        x = self.up1(xb, x4)  #Decoder: up sampling
+        x = self.up2(x,  x3)
+        x = self.up3(x,  x2)
+        x = self.up4(x,  x1)
+        seg_logits = self.outc(x)
+        return seg_logits, cls_logits
+def train_joint(model, train_loader, val_loader, epochs=10, lr=1e-3, lambda_cls=0.5):
+    model = model.to(DEVICE)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    seg_loss_fn = nn.BCEWithLogitsLoss()
+    cls_loss_fn = nn.CrossEntropyLoss()
+
+    hist = {k: [] for k in [
+        "train_total_loss","val_total_loss",
+        "train_seg_loss","val_seg_loss",
+        "train_cls_loss","val_cls_loss",
+        "train_iou","val_iou",
+        "train_acc","val_acc"
+    ]}
+
+    scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE.type=="cuda"))
+
+    for ep in range(epochs):
+        model.train()
+        sums = {"tot":0,"seg":0,"cls":0,"iou":0,"acc":0,"n":0}
+
+        for imgs, masks, labels, _, _ in tqdm(train_loader, desc=f"Train {ep+1}/{epochs}"):
+            imgs, masks, labels = imgs.to(DEVICE), masks.to(DEVICE), labels.to(DEVICE)
+            opt.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=(DEVICE.type=="cuda")):
+                seg_logits, cls_logits = model(imgs)
+                seg_loss = seg_loss_fn(seg_logits, masks)
+                cls_loss = cls_loss_fn(cls_logits, labels)
+                loss = seg_loss + lambda_cls*cls_loss
+
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+
+            bs = imgs.size(0)
+            sums["tot"] += loss.item()*bs
+            sums["seg"] += seg_loss.item()*bs
+            sums["cls"] += cls_loss.item()*bs
+            sums["iou"] += iou_score_from_logits(seg_logits.detach(), masks.detach())*bs
+            sums["acc"] += cls_accuracy(cls_logits.detach(), labels.detach())*bs
+            sums["n"] += bs
+
+        hist["train_total_loss"].append(sums["tot"]/sums["n"])
+        hist["train_seg_loss"].append(sums["seg"]/sums["n"])
+        hist["train_cls_loss"].append(sums["cls"]/sums["n"])
+        hist["train_iou"].append(sums["iou"]/sums["n"])
+        hist["train_acc"].append(sums["acc"]/sums["n"])
+
+        model.eval()
+        sums = {"tot":0,"seg":0,"cls":0,"iou":0,"acc":0,"n":0}
+        with torch.no_grad():
+            for imgs, masks, labels, _, _ in tqdm(val_loader, desc=f"Val {ep+1}/{epochs}"):
+                imgs, masks, labels = imgs.to(DEVICE), masks.to(DEVICE), labels.to(DEVICE)
+                seg_logits, cls_logits = model(imgs)
+                seg_loss = seg_loss_fn(seg_logits, masks)
+                cls_loss = cls_loss_fn(cls_logits, labels)
+                loss = seg_loss + lambda_cls*cls_loss
+
+                bs = imgs.size(0)
+                sums["tot"] += loss.item()*bs
+                sums["seg"] += seg_loss.item()*bs
+                sums["cls"] += cls_loss.item()*bs
+                sums["iou"] += iou_score_from_logits(seg_logits, masks)*bs
+                sums["acc"] += cls_accuracy(cls_logits, labels)*bs
+                sums["n"] += bs
+
+        hist["val_total_loss"].append(sums["tot"]/sums["n"])
+        hist["val_seg_loss"].append(sums["seg"]/sums["n"])
+        hist["val_cls_loss"].append(sums["cls"]/sums["n"])
+        hist["val_iou"].append(sums["iou"]/sums["n"])
+        hist["val_acc"].append(sums["acc"]/sums["n"])
+
+        print(f"\nEpoch {ep+1}/{epochs} | "
+              f"Train loss {hist['train_total_loss'][-1]:.4f} IoU {hist['train_iou'][-1]:.4f} Acc {hist['train_acc'][-1]:.4f} | "
+              f"Val loss {hist['val_total_loss'][-1]:.4f} IoU {hist['val_iou'][-1]:.4f} Acc {hist['val_acc'][-1]:.4f}\n")
+
+    return hist
+
+def plot_hist(hist, prefix=""):
+    for k,v in hist.items():
+        plt.figure(figsize=(6,4))
+        plt.plot(v)
+        plt.title(prefix + k)
+        plt.xlabel("epoch")
+        plt.grid(True)
+        plt.show()
+#U NET
+unet = UNetWithClassifier(in_ch=1, num_classes=NUM_CLASSES, base=32)
+hist_unet = train_joint(unet, train_loader, val_loader, epochs=10, lr=1e-3, lambda_cls=0.5)
+
+plot_hist(hist_unet, prefix="U-Net ")
+
+@torch.no_grad()
+def show_random_result(model, dataset):
+    model.eval()
+    idx = random.randint(0, len(dataset)-1)
+    img_t, mk_t, y_t, im_path, mk_path = dataset[idx]
+
+    seg_logits, cls_logits = model(img_t.unsqueeze(0).to(DEVICE))
+    pred = (torch.sigmoid(seg_logits).cpu().numpy()[0,0] > 0.5).astype(np.float32)
+
+    img = img_t.squeeze(0).numpy()
+    gt  = mk_t.squeeze(0).numpy()
+
+    iou = iou_score_from_logits(seg_logits.cpu(), mk_t.unsqueeze(0))
+    acc = cls_accuracy(cls_logits.cpu(), y_t.unsqueeze(0))
+
+    show_result_grid(img, gt, pred, processed=None, cls_acc=acc, iou=iou)
+
+    print("Image:", im_path)
+    if len(class_dirs)>0:
+        print("Pred class id:", cls_logits.argmax(dim=1).item(), "| True id:", y_t.item())
+
+show_random_result(unet, val_ds)
+show_random_result(unet, val_ds)
+
+for _ in range(10):
+    show_random_result(unet, val_ds)
+class AttentionGate(nn.Module):
+    def __init__(self, F_g, F_l, F_int):
+        super().__init__()
+        self.W_g = nn.Sequential(nn.Conv2d(F_g, F_int, 1, bias=True), nn.BatchNorm2d(F_int))
+        self.W_x = nn.Sequential(nn.Conv2d(F_l, F_int, 1, bias=True), nn.BatchNorm2d(F_int))
+        self.psi = nn.Sequential(nn.Conv2d(F_int, 1, 1, bias=True), nn.BatchNorm2d(1), nn.Sigmoid())
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, g, x):
+        psi = self.relu(self.W_g(g) + self.W_x(x))
+        psi = self.psi(psi)
+        return x * psi
+
+class UpAtt(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_ch, in_ch//2, 2, 2)
+        self.att = AttentionGate(F_g=in_ch//2, F_l=skip_ch, F_int=out_ch)
+        self.conv = DoubleConv(in_ch//2 + skip_ch, out_ch)
+
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        diffY = x2.size(2) - x1.size(2)
+        diffX = x2.size(3) - x1.size(3)
+        x1 = F.pad(x1, [diffX//2, diffX-diffX//2, diffY//2, diffY-diffY//2])
+        x2 = self.att(x1, x2)
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class AttentionUNetWithClassifier(nn.Module):
+    def __init__(self, in_ch=1, num_classes=4, base=32):
+        super().__init__()
+        self.inc = DoubleConv(in_ch, base)
+        self.down1 = Down(base, base*2)
+        self.down2 = Down(base*2, base*4)
+        self.down3 = Down(base*4, base*8)
+        self.down4 = Down(base*8, base*16)
+
+        self.up1 = UpAtt(base*16, base*8, base*8)
+        self.up2 = UpAtt(base*8,  base*4, base*4)
+        self.up3 = UpAtt(base*4,  base*2, base*2)
+        self.up4 = UpAtt(base*2,  base,   base)
+        self.outc = nn.Conv2d(base, 1, 1)
+
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.cls_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(base*16, base*8),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(base*8, num_classes)
+        )
+
+    def forward(self, x):
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        xb = self.down4(x4)
+
+        cls_logits = self.cls_head(self.gap(xb))
+
+        x = self.up1(xb, x4)
+        x = self.up2(x,  x3)
+        x = self.up3(x,  x2)
+        x = self.up4(x,  x1)
+        seg_logits = self.outc(x)
+        return seg_logits, cls_logits
+
+att_unet = AttentionUNetWithClassifier(in_ch=1, num_classes=NUM_CLASSES, base=32)
+hist_att = train_joint(att_unet, train_loader, val_loader, epochs=10, lr=1e-3, lambda_cls=0.5)
+
+plot_hist(hist_att, prefix="Attention U-Net ")
+
+print("U-Net best val IoU:", max(hist_unet["val_iou"]))
+print("Att best val IoU:", max(hist_att["val_iou"]))
+print("U-Net best val Acc:", max(hist_unet["val_acc"]))
+print("Att best val Acc:", max(hist_att["val_acc"]))
+
+show_random_result(att_unet, val_ds)
+show_random_result(att_unet, val_ds)
+
+for _ in range(10):
+    show_random_result(att_unet, val_ds)
